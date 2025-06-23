@@ -22,16 +22,18 @@ try:
     GENAI_AVAILABLE = True
 except ImportError:
     GENAI_AVAILABLE = False
-    print("Warning: google-generativeai not installed. AI features will be disabled.")
+    # The main function will handle informing the user and attempting installation.
+    # print("Warning: google-generativeai not installed. AI features will be disabled.")
 
 try:
-    from pygments import highlight
-    from pygments.lexers import PythonLexer
-    from pygments.formatters import NullFormatter
+    import pygments # Check if the base module is available
+    from pygments.lexers import PythonLexer # Keep if planning to use lexing
+    # from pygments.formatters import NullFormatter # Not used
+    # from pygments import highlight # Not used
     PYGMENTS_AVAILABLE = True
 except ImportError:
     PYGMENTS_AVAILABLE = False
-    print("Warning: pygments not installed. Syntax highlighting disabled.")
+    # The main function will handle informing the user and attempting installation.
 
 @dataclass
 class EditSuggestion:
@@ -65,7 +67,10 @@ class ModernStyle:
     
     # Fonts
     FONT_MAIN = ("Segoe UI", 10)
-    FONT_CODE = ("Consolas", 11)
+    # Define font families as a comma-separated string for fallbacks.
+    # Quotes can be used around names with spaces, though often not strictly necessary.
+    FONT_FAMILY_CODE = "Consolas, 'Courier New', Courier, monospace"
+    FONT_CODE = (FONT_FAMILY_CODE, 11) 
     FONT_SMALL = ("Segoe UI", 9)
     FONT_LARGE = ("Segoe UI", 12, "bold")
 
@@ -116,7 +121,8 @@ class AICodeEditor:
             self.api_key = simpledialog.askstring(
                 "Gemini API Key", 
                 "Enter your Gemini API key:",
-                show='*'
+                show='*',
+                parent=self.root 
             )
             
         if self.api_key:
@@ -467,7 +473,7 @@ if __name__ == "__main__":
                 self.status_bar.config(text=f"Opened: {os.path.basename(file_path)}")
                 
             except Exception as e:
-                messagebox.showerror("Error", f"Could not open file: {str(e)}")
+                messagebox.showerror("Error", f"Could not open file: {str(e)}", parent=self.root)
                 
     def save_file(self):
         """Save the current file"""
@@ -503,13 +509,14 @@ if __name__ == "__main__":
             self.status_bar.config(text=f"Saved: {os.path.basename(file_path)}")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save file: {str(e)}")
+            messagebox.showerror("Error", f"Could not save file: {str(e)}", parent=self.root)
             
     def confirm_unsaved_changes(self):
         """Ask user about unsaved changes"""
         result = messagebox.askyesnocancel(
             "Unsaved Changes",
-            "You have unsaved changes. Do you want to save them?"
+            "You have unsaved changes. Do you want to save them?",
+            parent=self.root
         )
         
         if result is True:  # Yes, save
@@ -606,12 +613,12 @@ if __name__ == "__main__":
     def ask_ai(self):
         """Send prompt to AI and get edit suggestions"""
         if not self.gemini_model:
-            messagebox.showerror("Error", "AI model not available. Please configure your API key.")
+            messagebox.showerror("Error", "AI model not available. Please configure your API key.", parent=self.root)
             return
             
         prompt = self.ai_prompt_var.get().strip()
         if not prompt:
-            messagebox.showwarning("Warning", "Please enter a description of what you'd like to change.")
+            messagebox.showwarning("Warning", "Please enter a description of what you'd like to change.", parent=self.root)
             return
             
         # Disable AI button and show processing
@@ -693,31 +700,47 @@ User request: {prompt}"""
                     
                 # Show edit preview on main thread
                 self.root.after(0, self.show_edit_preview, ai_data['analysis'], edit_suggestions)
+                self.root.after(0, lambda: self.status_bar.config(text="AI suggestions ready for review."))
                 
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                self.root.after(0, lambda: messagebox.showerror(
-                    "AI Response Error",
-                    f"Could not parse AI response: {str(e)}\n\nRaw response: {response.text[:200]}..."
-                ))
+            except json.JSONDecodeError as e:
+                error_message = f"Could not parse AI response (JSONDecodeError): {str(e)}\n"
+                error_message += f"Position: {e.pos}, Line: {e.lineno}, Column: {e.colno}\n"
+                error_message += f"\nRaw response excerpt:\n{response.text[:500]}..."
+                self.root.after(0, lambda: messagebox.showerror("AI Response Error", error_message, parent=self.root))
+                self.root.after(0, lambda: self.status_bar.config(text="AI Error: Invalid JSON response."))
+            except (KeyError, ValueError) as e:
+                error_message = f"Invalid AI response structure ({type(e).__name__}): {str(e)}\n"
+                error_message += "\nThe AI response did not match the expected format (e.g., missing 'analysis' or 'edits' keys).\n"
+                error_message += f"\nRaw response excerpt:\n{response.text[:500]}..."
+                self.root.after(0, lambda: messagebox.showerror("AI Response Error", error_message, parent=self.root))
+                self.root.after(0, lambda: self.status_bar.config(text="AI Error: Unexpected response structure."))
                 
         except Exception as e:
+            # This catches errors from self.gemini_model.generate_content() or other unexpected issues
             self.root.after(0, lambda: messagebox.showerror(
-                "AI Error",
-                f"Error communicating with AI: {str(e)}"
+                "AI Processing Error",
+                f"An unexpected error occurred while communicating with the AI: {str(e)}",
+                parent=self.root
             ))
+            self.root.after(0, lambda: self.status_bar.config(text=f"AI Error: {str(e)[:50]}..."))
         finally:
-            # Re-enable AI button
-            self.root.after(0, self._reset_ai_button)
+            # Re-enable AI button and reset processing flag
+            self.root.after(0, self._reset_ai_interaction)
             
-    def _reset_ai_button(self):
-        """Reset AI button state"""
+    def _reset_ai_interaction(self, status_message: Optional[str] = None):
+        """Reset AI button state, processing flag, and optionally update status bar."""
         self.ask_ai_btn.config(state='normal', text="🤖 Ask AI")
         self.is_ai_processing = False
+        if status_message:
+            self.status_bar.config(text=status_message)
         
     def show_edit_preview(self, analysis, edit_suggestions):
         """Show edit preview dialog"""
         if not edit_suggestions:
-            messagebox.showinfo("No Changes", "AI didn't suggest any changes for your request.")
+            # Parent for this messagebox should be self.root as preview_window doesn't exist.
+            messagebox.showinfo("No Changes", "AI didn't suggest any changes for your request.", parent=self.root)
+            self.status_bar.config(text="AI found no changes to suggest for your request.")
+            # _reset_ai_interaction is already called in the finally block of _process_ai_request
             return
             
         preview_window = tk.Toplevel(self.root)
@@ -1015,7 +1038,7 @@ User request: {prompt}"""
                 selected_edits.append(edit)
                 
         if not selected_edits:
-            messagebox.showwarning("No Selection", "Please select at least one edit to apply.")
+            messagebox.showwarning("No Selection", "Please select at least one edit to apply.", parent=preview_window)
             return
             
         # Sort edits by line number (descending) to avoid line number shifts
@@ -1026,29 +1049,45 @@ User request: {prompt}"""
             current_lines = self.code_text.get('1.0', 'end-1c').split('\n')
             
             for edit in selected_edits:
+                # Line numbers from AI are 1-based, convert to 0-based for list indexing
+                start_index = edit.line_start - 1
+                end_index = edit.line_end - 1 # For deletion/replacement, this is the last line to remove
+
                 if edit.edit_type == 'replace':
-                    # Replace lines
-                    for line_num in range(edit.line_start - 1, edit.line_end):
-                        if line_num < len(current_lines):
-                            current_lines[line_num] = ''  # Mark for removal
+                    # Validate line numbers
+                    if not (0 <= start_index < len(current_lines) and 0 <= end_index < len(current_lines) and start_index <= end_index):
+                        print(f"Warning: Invalid line numbers for replace: {edit.line_start}-{edit.line_end}. Skipping edit.")
+                        continue
+
+                    # Remove original lines (from start_index to end_index inclusive)
+                    del current_lines[start_index : end_index + 1]
                     
-                    # Insert new content at the first line
-                    if edit.line_start - 1 < len(current_lines):
-                        current_lines[edit.line_start - 1] = edit.suggested_code
+                    # Insert new lines (split suggested code into lines)
+                    suggested_lines = edit.suggested_code.split('\n')
+                    for i, line_content in enumerate(suggested_lines):
+                        current_lines.insert(start_index + i, line_content)
                         
                 elif edit.edit_type == 'insert':
-                    # Insert new lines
-                    insert_pos = min(edit.line_start - 1, len(current_lines))
-                    current_lines.insert(insert_pos, edit.suggested_code)
+                    # Validate line number (insertion happens *before* this line)
+                    # So, if line_start is 1, it inserts at index 0.
+                    # If line_start is len(current_lines) + 1, it inserts at the end.
+                    insert_at_index = edit.line_start - 1
+                    if not (0 <= insert_at_index <= len(current_lines)):
+                        print(f"Warning: Invalid line number for insert: {edit.line_start}. Skipping edit.")
+                        continue
+
+                    suggested_lines = edit.suggested_code.split('\n')
+                    for i, line_content in enumerate(suggested_lines):
+                        current_lines.insert(insert_at_index + i, line_content)
                     
                 elif edit.edit_type == 'delete':
-                    # Delete lines
-                    for line_num in range(edit.line_start - 1, edit.line_end):
-                        if line_num < len(current_lines):
-                            current_lines[line_num] = ''  # Mark for removal
-            
-            # Remove empty lines that were marked for deletion
-            current_lines = [line for line in current_lines if line != '']
+                    # Validate line numbers
+                    if not (0 <= start_index < len(current_lines) and 0 <= end_index < len(current_lines) and start_index <= end_index):
+                        print(f"Warning: Invalid line numbers for delete: {edit.line_start}-{edit.line_end}. Skipping edit.")
+                        continue
+                        
+                    # Delete lines (from start_index to end_index inclusive)
+                    del current_lines[start_index : end_index + 1]
             
             # Update the editor
             new_content = '\n'.join(current_lines)
@@ -1070,7 +1109,9 @@ User request: {prompt}"""
             self.ai_prompt_var.set("")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error applying edits: {str(e)}")
+            # If preview_window is already destroyed, parent to self.root
+            parent_window = self.root if not preview_window.winfo_exists() else preview_window
+            messagebox.showerror("Error", f"Error applying edits: {str(e)}", parent=parent_window)
             
     def configure_api_key(self):
         """Configure the Gemini API key"""
@@ -1078,7 +1119,8 @@ User request: {prompt}"""
             "Configure API Key",
             "Enter your Gemini API key:",
             show='*',
-            initialvalue=self.api_key if self.api_key else ""
+            initialvalue=self.api_key if self.api_key else "",
+            parent=self.root
         )
         
         if new_key:
@@ -1087,15 +1129,36 @@ User request: {prompt}"""
             
     def test_ai_connection(self):
         """Test the AI connection"""
+        if not GENAI_AVAILABLE:
+            messagebox.showerror("Error", "Gemini AI library not available. Please install 'google-generativeai'.", parent=self.root)
+            return
+
+        if not self.api_key:
+            messagebox.showerror("Error", "API key not set. Please configure your API key first.", parent=self.root)
+            return
+
         if not self.gemini_model:
-            messagebox.showerror("Error", "AI model not configured. Please set your API key first.")
+            messagebox.showerror("Error", "AI model not initialized. This might be due to an invalid API key or connection issue during setup.", parent=self.root)
+            # Optionally, try to re-initialize
+            # self.setup_gemini() 
+            # if not self.gemini_model:
+            #     return # Still not initialized
             return
             
         try:
+            self.status_bar.config(text="Testing AI connection...")
             test_response = self.gemini_model.generate_content("Hello, please respond with 'Connection successful'")
-            messagebox.showinfo("Connection Test", f"AI Response: {test_response.text}")
+            
+            if "Connection successful" in test_response.text:
+                messagebox.showinfo("Connection Test Successful", f"AI Response: {test_response.text}", parent=self.root)
+                self.ai_status_label.config(text="AI: Connected ✓", foreground=ModernStyle.ACCENT_GREEN)
+            else:
+                messagebox.showwarning("Connection Test", f"AI responded, but not as expected: {test_response.text}", parent=self.root)
+            self.status_bar.config(text="AI connection test complete.")
         except Exception as e:
-            messagebox.showerror("Connection Test Failed", f"Error: {str(e)}")
+            messagebox.showerror("Connection Test Failed", f"Error during AI connection test: {str(e)}", parent=self.root)
+            self.ai_status_label.config(text="AI: Connection Error", foreground=ModernStyle.ACCENT_RED)
+            self.status_bar.config(text="AI connection test failed.")
             
     def on_enter_pressed(self, event):
         """Handle Enter key press in AI prompt"""
@@ -1119,27 +1182,58 @@ User request: {prompt}"""
 def main():
     """Main function to run the application"""
     # Check for required dependencies
-    missing_deps = []
-    
+    missing_core_deps = []
     if not GENAI_AVAILABLE:
-        missing_deps.append("google-generativeai")
+        missing_core_deps.append("google-generativeai")
+    # Pygments is for syntax highlighting, potentially optional but good to have.
+    # For now, let's treat it as core for the app's intended functionality.
     if not PYGMENTS_AVAILABLE:
-        missing_deps.append("pygments")
+        missing_core_deps.append("Pygments") # Package name for pip install
     
-    if missing_deps:
-        print("Missing dependencies. Installing...")
-        print(f"Please run: pip install {' '.join(missing_deps)}")
+    if missing_core_deps:
+        missing_deps_str = ", ".join(missing_core_deps)
+        message = (
+            f"Critical dependencies missing: {missing_deps_str}.\n\n"
+            "The application will attempt to install them now. "
+            "This may take a moment.\n\n"
+            "If this fails, please install them manually by running:\n"
+            f"pip install {' '.join(missing_core_deps)}\n\n"
+            "Do you want to proceed with automatic installation?"
+        )
         
-        # Try to install automatically
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing_deps)
-            print("Dependencies installed successfully. Please restart the application.")
-            return
-        except subprocess.CalledProcessError:
-            print("Failed to install dependencies automatically.")
-            print(f"Please manually run: pip install {' '.join(missing_deps)}")
-            return
-    
+        # Need a temporary root for messagebox if app hasn't started
+        # However, this main() is before app = AICodeEditor(), so no Tk root yet.
+        # Print to console is the most straightforward here.
+        print(message.replace("\n\n", "\n")) # Condense for console
+        
+        # For a GUI app, a simple console prompt for this is okay before GUI starts.
+        # Or, we could pop a simple Tk dialog if Tk is available at this stage.
+        # For now, let's assume console interaction for this pre-flight check.
+        proceed = input("Proceed with installation? (yes/no): ").strip().lower()
+
+        if proceed == 'yes' or proceed == 'y':
+            print(f"\nAttempting to install: {missing_deps_str}...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing_core_deps)
+                print("\nDependencies installed successfully.")
+                print("Please restart the application for changes to take effect.")
+                # Inform that a restart is needed.
+                # For a GUI, could show a messagebox here, but console is fine.
+                # simpledialog won't work without a root window.
+                return # Exit after installing, user needs to restart
+            except subprocess.CalledProcessError as e:
+                print(f"\nError: Failed to install dependencies automatically: {e}")
+                print(f"Please manually run: pip install {' '.join(missing_core_deps)}")
+                return # Exit, cannot run without dependencies
+            except FileNotFoundError: # E.g. pip not found
+                print("\nError: 'pip' command not found. Please ensure pip is installed and in your PATH.")
+                print(f"Please manually run: pip install {' '.join(missing_core_deps)}")
+                return
+        else:
+            print("\nInstallation cancelled by user. Application cannot start without dependencies.")
+            print(f"Please manually run: pip install {' '.join(missing_core_deps)}")
+            return # Exit
+
     # Create and run the application
     app = AICodeEditor()
     app.run()
