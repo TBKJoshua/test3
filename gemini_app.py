@@ -1,51 +1,1149 @@
-import os
-import threading
-import queue
-import subprocess
-import ast
-import configparser
-import time
-from datetime import datetime
-import re
-import shutil
-import json
-import traceback
+#!/usr/bin/env python3
+"""
+AI Code Editor - A professional Python desktop application with Gemini AI integration
+Mimics Claude's artifact editing system for precise code modifications
+"""
+
 import tkinter as tk
-import tkinter.font # Add this import for tk.font
-from tkinter import ttk, simpledialog, messagebox, scrolledtext
-from pathlib import Path
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import json
+import threading
+import subprocess
+import sys
+import os
+import time
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+import re
 
-# Third-party imports
-from PIL import Image, ImageTk
-
-# pip install google-genai Pillow Pygments
+# Import required libraries with fallback handling
 try:
-    from google import genai
-    from google.genai import types
-    GENAI_IMPORTED = True
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
 except ImportError:
-    GENAI_IMPORTED = False
+    GENAI_AVAILABLE = False
+    print("Warning: google-generativeai not installed. AI features will be disabled.")
 
-from pygments import highlight
-from pygments.lexers import get_lexer_by_name, guess_lexer_for_filename
-from pygments.styles import get_style_by_name
-from pygments.util import ClassNotFound
+try:
+    from pygments import highlight
+    from pygments.lexers import PythonLexer
+    from pygments.formatters import NullFormatter
+    PYGMENTS_AVAILABLE = True
+except ImportError:
+    PYGMENTS_AVAILABLE = False
+    print("Warning: pygments not installed. Syntax highlighting disabled.")
 
-# -----------------------------------------------------------------------------
-# Configuration
-# -----------------------------------------------------------------------------
-CONFIG_PATH = Path('config.ini')
-VM_DIR = Path('vm')
-TRASH_DIR_NAME = ".trash" # For storing discarded images
-APP_TITLE = "Enhanced Multi-Agent IDE"
-TEXT_MODEL_NAME = "gemini-2.5-flash" #"gemini-2.5-flash-preview-05-20"
-IMAGE_MODEL_NAME = "gemini-2.0-flash-preview-image-generation"
+@dataclass
+class EditSuggestion:
+    """Represents a single edit suggestion from the AI"""
+    line_start: int
+    line_end: int
+    original_code: str
+    suggested_code: str
+    explanation: str
+    edit_type: str  # 'replace', 'insert', 'delete'
+    confidence: float
+    selected: bool = True
 
-# -----------------------------------------------------------------------------
-# Application Entry Point
-# -----------------------------------------------------------------------------
+class ModernStyle:
+    """Modern dark theme styling constants"""
+    # Colors
+    BG_MAIN = "#1e1e1e"
+    BG_PANEL = "#2d2d2d"
+    BG_HOVER = "#3d3d3d"
+    BG_SELECTED = "#404040"
+    
+    TEXT_PRIMARY = "#ffffff"
+    TEXT_SECONDARY = "#cccccc" 
+    TEXT_TERTIARY = "#888888"
+    
+    ACCENT_BLUE = "#007acc"
+    ACCENT_TEAL = "#4ec9b0"
+    ACCENT_RED = "#f44747"
+    ACCENT_YELLOW = "#ffcc02"
+    ACCENT_GREEN = "#4caf50"
+    
+    # Fonts
+    FONT_MAIN = ("Segoe UI", 10)
+    FONT_CODE = ("Consolas", 11)
+    FONT_SMALL = ("Segoe UI", 9)
+    FONT_LARGE = ("Segoe UI", 12, "bold")
+
+class AICodeEditor:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.setup_window()
+        self.setup_variables()
+        self.setup_ui()
+        self.setup_bindings()
+        self.apply_modern_styling()
+        
+        # Load sample code
+        self.load_sample_code()
+        
+        # Initialize AI
+        self.setup_gemini()
+        
+    def setup_window(self):
+        """Configure the main window"""
+        self.root.title("AI Code Editor - Gemini Integration")
+        self.root.geometry("1200x800")
+        self.root.configure(bg=ModernStyle.BG_MAIN)
+        self.root.minsize(800, 600)
+        
+        # Configure grid weights
+        self.root.grid_rowconfigure(2, weight=1)  # Code editor area
+        self.root.grid_columnconfigure(0, weight=1)
+        
+    def setup_variables(self):
+        """Initialize instance variables"""
+        self.current_file = None
+        self.is_modified = False
+        self.gemini_model = None
+        self.api_key = None
+        self.pending_edits = []
+        self.is_ai_processing = False
+        
+    def setup_gemini(self):
+        """Initialize Gemini AI integration"""
+        if not GENAI_AVAILABLE:
+            self.ai_status_label.config(text="AI: Not Available (Install google-generativeai)")
+            return
+            
+        # Try to load API key from environment or prompt user
+        self.api_key = os.getenv('GEMINI_API_KEY')
+        if not self.api_key:
+            self.api_key = simpledialog.askstring(
+                "Gemini API Key", 
+                "Enter your Gemini API key:",
+                show='*'
+            )
+            
+        if self.api_key:
+            try:
+                genai.configure(api_key=self.api_key)
+                self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                self.ai_status_label.config(
+                    text="AI: Connected ✓", 
+                    foreground=ModernStyle.ACCENT_GREEN
+                )
+            except Exception as e:
+                self.ai_status_label.config(
+                    text=f"AI: Error - {str(e)[:20]}...", 
+                    foreground=ModernStyle.ACCENT_RED
+                )
+        else:
+            self.ai_status_label.config(
+                text="AI: No API Key", 
+                foreground=ModernStyle.ACCENT_YELLOW
+            )
+            
+    def setup_ui(self):
+        """Create the user interface"""
+        self.create_menu_bar()
+        self.create_toolbar()
+        self.create_ai_prompt_section()
+        self.create_code_editor()
+        self.create_status_bar()
+        
+    def create_menu_bar(self):
+        """Create the application menu bar"""
+        menubar = tk.Menu(self.root, bg=ModernStyle.BG_PANEL, fg=ModernStyle.TEXT_PRIMARY)
+        self.root.config(menu=menubar)
+        
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0, bg=ModernStyle.BG_PANEL, fg=ModernStyle.TEXT_PRIMARY)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="New", command=self.new_file, accelerator="Ctrl+N")
+        file_menu.add_command(label="Open...", command=self.open_file, accelerator="Ctrl+O")
+        file_menu.add_separator()
+        file_menu.add_command(label="Save", command=self.save_file, accelerator="Ctrl+S") 
+        file_menu.add_command(label="Save As...", command=self.save_file_as, accelerator="Ctrl+Shift+S")
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_closing)
+        
+        # Edit menu
+        edit_menu = tk.Menu(menubar, tearoff=0, bg=ModernStyle.BG_PANEL, fg=ModernStyle.TEXT_PRIMARY)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Undo", command=lambda: self.code_text.event_generate("<<Undo>>"))
+        edit_menu.add_command(label="Redo", command=lambda: self.code_text.event_generate("<<Redo>>"))
+        
+        # AI menu
+        ai_menu = tk.Menu(menubar, tearoff=0, bg=ModernStyle.BG_PANEL, fg=ModernStyle.TEXT_PRIMARY)
+        menubar.add_cascade(label="AI", menu=ai_menu)
+        ai_menu.add_command(label="Configure API Key", command=self.configure_api_key)
+        ai_menu.add_command(label="Test Connection", command=self.test_ai_connection)
+        
+    def create_toolbar(self):
+        """Create the application toolbar"""
+        toolbar_frame = tk.Frame(self.root, bg=ModernStyle.BG_PANEL, height=40)
+        toolbar_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
+        toolbar_frame.grid_propagate(False)
+        
+        # Buttons with modern styling
+        btn_style = {
+            'bg': ModernStyle.BG_HOVER,
+            'fg': ModernStyle.TEXT_PRIMARY,
+            'font': ModernStyle.FONT_MAIN,
+            'relief': 'flat',
+            'borderwidth': 0,
+            'padx': 15,
+            'pady': 5
+        }
+        
+        tk.Button(toolbar_frame, text="📄 New", command=self.new_file, **btn_style).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar_frame, text="📁 Open", command=self.open_file, **btn_style).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar_frame, text="💾 Save", command=self.save_file, **btn_style).pack(side=tk.LEFT, padx=2)
+        
+        # Separator
+        tk.Frame(toolbar_frame, width=2, bg=ModernStyle.TEXT_TERTIARY).pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=5)
+        
+        tk.Button(toolbar_frame, text="▶️ Run", command=self.run_code, **btn_style).pack(side=tk.LEFT, padx=2)
+        
+        # AI Status on the right
+        self.ai_status_label = tk.Label(
+            toolbar_frame, 
+            text="AI: Initializing...", 
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_TERTIARY,
+            font=ModernStyle.FONT_SMALL
+        )
+        self.ai_status_label.pack(side=tk.RIGHT, padx=10)
+        
+    def create_ai_prompt_section(self):
+        """Create the AI prompt input section"""
+        ai_frame = tk.Frame(self.root, bg=ModernStyle.BG_PANEL, height=60)
+        ai_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        ai_frame.grid_propagate(False)
+        ai_frame.grid_columnconfigure(1, weight=1)
+        
+        # Label
+        tk.Label(
+            ai_frame, 
+            text="What would you like to change?", 
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_MAIN
+        ).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        
+        # Input field
+        self.ai_prompt_var = tk.StringVar()
+        self.ai_prompt_entry = tk.Entry(
+            ai_frame,
+            textvariable=self.ai_prompt_var,
+            bg=ModernStyle.BG_MAIN,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_MAIN,
+            relief='solid',
+            borderwidth=1,
+            insertbackground=ModernStyle.TEXT_PRIMARY
+        )
+        self.ai_prompt_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        
+        # Ask AI Button
+        self.ask_ai_btn = tk.Button(
+            ai_frame,
+            text="🤖 Ask AI",
+            command=self.ask_ai,
+            bg=ModernStyle.ACCENT_BLUE,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_MAIN,
+            relief='flat',
+            borderwidth=0,
+            padx=20,
+            pady=8
+        )
+        self.ask_ai_btn.grid(row=1, column=2, sticky="e", padx=5, pady=5)
+        
+    def create_code_editor(self):
+        """Create the main code editor area"""
+        editor_frame = tk.Frame(self.root, bg=ModernStyle.BG_MAIN)
+        editor_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
+        editor_frame.grid_rowconfigure(0, weight=1)
+        editor_frame.grid_columnconfigure(1, weight=1)
+        
+        # Line numbers
+        self.line_numbers = tk.Text(
+            editor_frame,
+            width=4,
+            padx=5,
+            pady=5,
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_TERTIARY,
+            font=ModernStyle.FONT_CODE,
+            relief='flat',
+            state='disabled',
+            wrap='none'
+        )
+        self.line_numbers.grid(row=0, column=0, sticky="ns")
+        
+        # Code text area
+        self.code_text = tk.Text(
+            editor_frame,
+            bg=ModernStyle.BG_MAIN,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_CODE,
+            relief='flat',
+            insertbackground=ModernStyle.TEXT_PRIMARY,
+            selectbackground=ModernStyle.ACCENT_BLUE,
+            wrap='none',
+            undo=True,
+            maxundo=50
+        )
+        self.code_text.grid(row=0, column=1, sticky="nsew")
+        
+        # Scrollbars
+        v_scrollbar = tk.Scrollbar(editor_frame, orient="vertical", command=self.on_scroll)
+        v_scrollbar.grid(row=0, column=2, sticky="ns")
+        self.code_text.config(yscrollcommand=v_scrollbar.set)
+        
+        h_scrollbar = tk.Scrollbar(editor_frame, orient="horizontal", command=self.code_text.xview)
+        h_scrollbar.grid(row=1, column=1, sticky="ew")
+        self.code_text.config(xscrollcommand=h_scrollbar.set)
+        
+        # Bind events
+        self.code_text.bind('<KeyRelease>', self.on_text_change)
+        self.code_text.bind('<Button-1>', self.on_text_change)
+        self.code_text.bind('<Return>', self.on_text_change)
+        
+    def create_status_bar(self):
+        """Create the status bar"""
+        self.status_bar = tk.Label(
+            self.root,
+            text="Ready",
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_SECONDARY,
+            font=ModernStyle.FONT_SMALL,
+            anchor="w",
+            relief='sunken',
+            padx=10
+        )
+        self.status_bar.grid(row=3, column=0, sticky="ew")
+        
+    def setup_bindings(self):
+        """Setup keyboard shortcuts and event bindings"""
+        self.root.bind('<Control-n>', lambda e: self.new_file())
+        self.root.bind('<Control-o>', lambda e: self.open_file())
+        self.root.bind('<Control-s>', lambda e: self.save_file())
+        self.root.bind('<Control-Shift-S>', lambda e: self.save_file_as())
+        self.root.bind('<F5>', lambda e: self.run_code())
+        self.root.bind('<Return>', self.on_enter_pressed)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+    def apply_modern_styling(self):
+        """Apply modern styling to ttk widgets"""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Configure ttk styles
+        style.configure('Modern.TButton',
+                       background=ModernStyle.BG_HOVER,
+                       foreground=ModernStyle.TEXT_PRIMARY,
+                       borderwidth=0,
+                       focuscolor='none')
+        
+    def load_sample_code(self):
+        """Load sample Python code with various issues for testing"""
+        sample_code = '''import sys
+import requests
+
+def calculate_average(numbers):
+    total = 0
+    for num in numbers:
+        total += num
+    return total / len(numbers)
+
+def fetch_user_data(user_id):
+    url = f"https://api.example.com/users/{user_id}"
+    response = requests.get(url)
+    return response.json()
+
+def process_data(data):
+    results = []
+    for item in data:
+        if item > 0:
+            results.append(item * 2)
+    return results
+
+class DataProcessor:
+    def __init__(self):
+        self.data = []
+    
+    def add_data(self, value):
+        self.data.append(value)
+    
+    def get_stats(self):
+        if len(self.data) == 0:
+            return None
+        return {
+            'mean': sum(self.data) / len(self.data),
+            'max': max(self.data),
+            'min': min(self.data)
+        }
+
 if __name__ == "__main__":
-    VM_DIR.mkdir(exist_ok=True)
-    app = EnhancedGeminiIDE()
-    app.mainloop()
+    processor = DataProcessor()
+    numbers = [1, 2, 3, 4, 5]
+    
+    for num in numbers:
+        processor.add_data(num)
+    
+    stats = processor.get_stats()
+    print("Statistics:", stats)
+    
+    avg = calculate_average(numbers)
+    print(f"Average: {avg}")
+'''
+        self.code_text.insert('1.0', sample_code)
+        self.update_line_numbers()
+        
+    def on_scroll(self, *args):
+        """Handle scrolling for synchronized line numbers"""
+        self.code_text.yview(*args)
+        self.line_numbers.yview(*args)
+        
+    def on_text_change(self, event=None):
+        """Handle text changes in the editor"""
+        self.update_line_numbers()
+        self.is_modified = True
+        self.update_title()
+        
+    def update_line_numbers(self):
+        """Update the line numbers display"""
+        self.line_numbers.config(state='normal')
+        self.line_numbers.delete('1.0', 'end')
+        
+        line_count = int(self.code_text.index('end-1c').split('.')[0])
+        line_numbers_text = '\n'.join(str(i) for i in range(1, line_count + 1))
+        
+        self.line_numbers.insert('1.0', line_numbers_text)
+        self.line_numbers.config(state='disabled')
+        
+    def update_title(self):
+        """Update the window title"""
+        title = "AI Code Editor - Gemini Integration"
+        if self.current_file:
+            title += f" - {os.path.basename(self.current_file)}"
+        if self.is_modified:
+            title += " *"
+        self.root.title(title)
+        
+    def new_file(self):
+        """Create a new file"""
+        if self.is_modified and not self.confirm_unsaved_changes():
+            return
+            
+        self.code_text.delete('1.0', 'end')
+        self.current_file = None
+        self.is_modified = False
+        self.update_title()
+        self.update_line_numbers()
+        self.status_bar.config(text="New file created")
+        
+    def open_file(self):
+        """Open an existing file"""
+        if self.is_modified and not self.confirm_unsaved_changes():
+            return
+            
+        file_path = filedialog.askopenfilename(
+            title="Open File",
+            filetypes=[
+                ("Python files", "*.py"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    content = file.read()
+                    
+                self.code_text.delete('1.0', 'end')
+                self.code_text.insert('1.0', content)
+                self.current_file = file_path
+                self.is_modified = False
+                self.update_title()
+                self.update_line_numbers()
+                self.status_bar.config(text=f"Opened: {os.path.basename(file_path)}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open file: {str(e)}")
+                
+    def save_file(self):
+        """Save the current file"""
+        if self.current_file:
+            self.save_to_file(self.current_file)
+        else:
+            self.save_file_as()
+            
+    def save_file_as(self):
+        """Save the file with a new name"""
+        file_path = filedialog.asksaveasfilename(
+            title="Save File",
+            defaultextension=".py",
+            filetypes=[
+                ("Python files", "*.py"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            self.save_to_file(file_path)
+            
+    def save_to_file(self, file_path):
+        """Save content to the specified file"""
+        try:
+            with open(file_path, 'w', encoding='utf-8') as file:
+                content = self.code_text.get('1.0', 'end-1c')
+                file.write(content)
+                
+            self.current_file = file_path
+            self.is_modified = False
+            self.update_title()
+            self.status_bar.config(text=f"Saved: {os.path.basename(file_path)}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save file: {str(e)}")
+            
+    def confirm_unsaved_changes(self):
+        """Ask user about unsaved changes"""
+        result = messagebox.askyesnocancel(
+            "Unsaved Changes",
+            "You have unsaved changes. Do you want to save them?"
+        )
+        
+        if result is True:  # Yes, save
+            self.save_file()
+            return not self.is_modified  # Only proceed if save was successful
+        elif result is False:  # No, don't save
+            return True
+        else:  # Cancel
+            return False
+            
+    def run_code(self):
+        """Execute the current Python code"""
+        if not self.current_file:
+            # Save to temporary file
+            temp_file = "temp_code.py"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                f.write(self.code_text.get('1.0', 'end-1c'))
+            file_to_run = temp_file
+        else:
+            if self.is_modified:
+                self.save_file()
+            file_to_run = self.current_file
+            
+        # Run in separate thread to prevent UI blocking
+        threading.Thread(target=self._execute_code, args=(file_to_run,), daemon=True).start()
+        
+    def _execute_code(self, file_path):
+        """Execute code in a separate thread"""
+        try:
+            self.status_bar.config(text="Running code...")
+            start_time = time.time()
+            
+            result = subprocess.run(
+                [sys.executable, file_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            execution_time = time.time() - start_time
+            
+            # Show results in a popup window
+            self.root.after(0, self.show_execution_results, result, execution_time)
+            
+        except subprocess.TimeoutExpired:
+            self.root.after(0, lambda: self.status_bar.config(text="Code execution timed out"))
+        except Exception as e:
+            self.root.after(0, lambda: self.status_bar.config(text=f"Execution error: {str(e)}"))
+            
+    def show_execution_results(self, result, execution_time):
+        """Show code execution results in a popup"""
+        results_window = tk.Toplevel(self.root)
+        results_window.title("Code Execution Results")
+        results_window.geometry("600x400")
+        results_window.configure(bg=ModernStyle.BG_MAIN)
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(results_window)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Output tab
+        output_frame = tk.Frame(notebook, bg=ModernStyle.BG_MAIN)
+        notebook.add(output_frame, text="Output")
+        
+        output_text = tk.Text(
+            output_frame,
+            bg=ModernStyle.BG_MAIN,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_CODE,
+            wrap=tk.WORD
+        )
+        output_text.pack(fill=tk.BOTH, expand=True)
+        output_text.insert('1.0', result.stdout if result.stdout else "(No output)")
+        
+        # Error tab (if there are errors)
+        if result.stderr:
+            error_frame = tk.Frame(notebook, bg=ModernStyle.BG_MAIN)
+            notebook.add(error_frame, text="Errors")
+            
+            error_text = tk.Text(
+                error_frame,
+                bg=ModernStyle.BG_MAIN,
+                fg=ModernStyle.ACCENT_RED,
+                font=ModernStyle.FONT_CODE,
+                wrap=tk.WORD
+            )
+            error_text.pack(fill=tk.BOTH, expand=True)
+            error_text.insert('1.0', result.stderr)
+            
+        # Status info
+        status_text = f"Exit code: {result.returncode} | Execution time: {execution_time:.2f}s"
+        self.status_bar.config(text=status_text)
+        
+    def ask_ai(self):
+        """Send prompt to AI and get edit suggestions"""
+        if not self.gemini_model:
+            messagebox.showerror("Error", "AI model not available. Please configure your API key.")
+            return
+            
+        prompt = self.ai_prompt_var.get().strip()
+        if not prompt:
+            messagebox.showwarning("Warning", "Please enter a description of what you'd like to change.")
+            return
+            
+        # Disable AI button and show processing
+        self.ask_ai_btn.config(state='disabled', text="🤖 Processing...")
+        self.is_ai_processing = True
+        
+        # Run AI request in separate thread
+        threading.Thread(target=self._process_ai_request, args=(prompt,), daemon=True).start()
+        
+    def _process_ai_request(self, prompt):
+        """Process AI request in separate thread"""
+        try:
+            current_code = self.code_text.get('1.0', 'end-1c')
+            
+            ai_prompt = f"""You are a precise code editor assistant. Analyze the provided code and suggest specific edits based on the user's request.
+
+ALWAYS respond with valid JSON in this exact format:
+{{
+  "analysis": "Brief summary of what you found and will change",
+  "edits": [
+    {{
+      "line_start": 5,
+      "line_end": 5,
+      "original_code": "def old_function():",
+      "suggested_code": "def improved_function() -> None:",
+      "explanation": "Added type hint for better code documentation",
+      "edit_type": "replace",
+      "confidence": 0.95
+    }}
+  ]
+}}
+
+Rules:
+- Be surgical - only change what's necessary
+- Line numbers start from 1
+- For insertions: line_start = line_end, original_code = ""
+- For deletions: suggested_code = ""
+- Match original code exactly (including whitespace)
+- Focus on the specific user request
+- Only suggest changes that directly address the request
+
+Current code:
+```python
+{current_code}
+```
+
+User request: {prompt}"""
+
+            response = self.gemini_model.generate_content(ai_prompt)
+            
+            # Parse AI response
+            try:
+                # Extract JSON from response
+                response_text = response.text.strip()
+                if response_text.startswith('```json'):
+                    response_text = response_text[7:-3]
+                elif response_text.startswith('```'):
+                    response_text = response_text[3:-3]
+                    
+                ai_data = json.loads(response_text)
+                
+                # Validate response structure
+                if 'analysis' not in ai_data or 'edits' not in ai_data:
+                    raise ValueError("Invalid AI response structure")
+                    
+                # Convert to EditSuggestion objects
+                edit_suggestions = []
+                for edit_data in ai_data['edits']:
+                    suggestion = EditSuggestion(
+                        line_start=edit_data['line_start'],
+                        line_end=edit_data['line_end'],
+                        original_code=edit_data['original_code'],
+                        suggested_code=edit_data['suggested_code'],
+                        explanation=edit_data['explanation'],
+                        edit_type=edit_data['edit_type'],
+                        confidence=edit_data['confidence']
+                    )
+                    edit_suggestions.append(suggestion)
+                    
+                # Show edit preview on main thread
+                self.root.after(0, self.show_edit_preview, ai_data['analysis'], edit_suggestions)
+                
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "AI Response Error",
+                    f"Could not parse AI response: {str(e)}\n\nRaw response: {response.text[:200]}..."
+                ))
+                
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror(
+                "AI Error",
+                f"Error communicating with AI: {str(e)}"
+            ))
+        finally:
+            # Re-enable AI button
+            self.root.after(0, self._reset_ai_button)
+            
+    def _reset_ai_button(self):
+        """Reset AI button state"""
+        self.ask_ai_btn.config(state='normal', text="🤖 Ask AI")
+        self.is_ai_processing = False
+        
+    def show_edit_preview(self, analysis, edit_suggestions):
+        """Show edit preview dialog"""
+        if not edit_suggestions:
+            messagebox.showinfo("No Changes", "AI didn't suggest any changes for your request.")
+            return
+            
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title("AI Edit Suggestions")
+        preview_window.geometry("900x700")
+        preview_window.configure(bg=ModernStyle.BG_MAIN)
+        preview_window.transient(self.root)
+        preview_window.grab_set()
+        
+        # Main frame
+        main_frame = tk.Frame(preview_window, bg=ModernStyle.BG_MAIN)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Analysis section
+        analysis_frame = tk.Frame(main_frame, bg=ModernStyle.BG_PANEL, relief='solid', bd=1)
+        analysis_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            analysis_frame,
+            text=analysis,
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_SECONDARY,
+            font=ModernStyle.FONT_MAIN,
+            wraplength=850,
+            justify='left'
+        ).pack(anchor='w', padx=10, pady=(0, 10))
+        
+        # Edit suggestions section
+        suggestions_frame = tk.Frame(main_frame, bg=ModernStyle.BG_MAIN)
+        suggestions_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Header with controls
+        header_frame = tk.Frame(suggestions_frame, bg=ModernStyle.BG_MAIN)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            header_frame,
+            text=f"Edit Suggestions ({len(edit_suggestions)} changes):",
+            bg=ModernStyle.BG_MAIN,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_LARGE
+        ).pack(side=tk.LEFT)
+        
+        # Bulk selection buttons
+        btn_frame = tk.Frame(header_frame, bg=ModernStyle.BG_MAIN)
+        btn_frame.pack(side=tk.RIGHT)
+        
+        tk.Button(
+            btn_frame,
+            text="Select All",
+            command=lambda: self.toggle_all_edits(edit_suggestions, True),
+            bg=ModernStyle.BG_HOVER,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_SMALL,
+            relief='flat',
+            padx=10
+        ).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(
+            btn_frame,
+            text="Select None",
+            command=lambda: self.toggle_all_edits(edit_suggestions, False),
+            bg=ModernStyle.BG_HOVER,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_SMALL,
+            relief='flat',
+            padx=10
+        ).pack(side=tk.LEFT, padx=2)
+        
+        # Scrollable frame for edit cards
+        canvas = tk.Canvas(suggestions_frame, bg=ModernStyle.BG_MAIN, highlightthickness=0)
+        scrollbar = tk.Scrollbar(suggestions_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=ModernStyle.BG_MAIN)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Create edit cards
+        self.edit_checkboxes = {}
+        for i, edit in enumerate(edit_suggestions):
+            self.create_edit_card(scrollable_frame, edit, i)
+            
+        # Action buttons
+        action_frame = tk.Frame(main_frame, bg=ModernStyle.BG_MAIN)
+        action_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Button(
+            action_frame,
+            text="Apply Selected Changes",
+            command=lambda: self.apply_selected_edits(edit_suggestions, preview_window),
+            bg=ModernStyle.ACCENT_GREEN,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_MAIN,
+            relief='flat',
+            padx=20,
+            pady=8
+        ).pack(side=tk.RIGHT, padx=5)
+        
+        tk.Button(
+            action_frame,
+            text="Cancel",
+            command=preview_window.destroy,
+            bg=ModernStyle.BG_HOVER,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_MAIN,
+            relief='flat',
+            padx=20,
+            pady=8
+        ).pack(side=tk.RIGHT, padx=5)
+        
+    def create_edit_card(self, parent, edit, index):
+        """Create a card for displaying an edit suggestion"""
+        card_frame = tk.Frame(
+            parent, 
+            bg=ModernStyle.BG_PANEL, 
+            relief='solid', 
+            bd=1
+        )
+        card_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        # Header with checkbox and info
+        header_frame = tk.Frame(card_frame, bg=ModernStyle.BG_PANEL)
+        header_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Checkbox
+        checkbox_var = tk.BooleanVar(value=edit.selected)
+        self.edit_checkboxes[index] = checkbox_var
+        
+        checkbox = tk.Checkbutton(
+            header_frame,
+            variable=checkbox_var,
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_PRIMARY,
+            selectcolor=ModernStyle.BG_HOVER,
+            activebackground=ModernStyle.BG_PANEL,
+            activeforeground=ModernStyle.TEXT_PRIMARY
+        )
+        checkbox.pack(side=tk.LEFT)
+        
+        # Edit info
+        info_text = f"Lines {edit.line_start}-{edit.line_end} • {edit.edit_type} • Confidence: {edit.confidence:.0%}"
+        tk.Label(
+            header_frame,
+            text=info_text,
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_TERTIARY,
+            font=ModernStyle.FONT_SMALL
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Explanation
+        tk.Label(
+            card_frame,
+            text=edit.explanation,
+            bg=ModernStyle.BG_PANEL,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_MAIN,
+            wraplength=800,
+            justify='left'
+        ).pack(fill=tk.X, padx=10, pady=(0, 5))
+        
+        # Code diff section
+        diff_frame = tk.Frame(card_frame, bg=ModernStyle.BG_MAIN)
+        diff_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        if edit.edit_type == 'replace':
+            # Show original code (red background)
+            if edit.original_code.strip():
+                original_frame = tk.Frame(diff_frame, bg=ModernStyle.ACCENT_RED)
+                original_frame.pack(fill=tk.X, pady=1)
+                
+                tk.Label(
+                    original_frame,
+                    text="- Remove:",
+                    bg=ModernStyle.ACCENT_RED,
+                    fg=ModernStyle.TEXT_PRIMARY,
+                    font=ModernStyle.FONT_SMALL
+                ).pack(anchor='w', padx=5, pady=2)
+                
+                tk.Text(
+                    original_frame,
+                    height=min(3, edit.original_code.count('\n') + 1),
+                    bg='#2d1b1b',
+                    fg=ModernStyle.TEXT_PRIMARY,
+                    font=ModernStyle.FONT_CODE,
+                    wrap=tk.NONE,
+                    state='normal'
+                ).pack(fill=tk.X, padx=5, pady=2)
+                
+                original_text = original_frame.winfo_children()[-1]
+                original_text.insert('1.0', edit.original_code)
+                original_text.config(state='disabled')
+            
+            # Show suggested code (green background)
+            if edit.suggested_code.strip():
+                suggested_frame = tk.Frame(diff_frame, bg=ModernStyle.ACCENT_GREEN)
+                suggested_frame.pack(fill=tk.X, pady=1)
+                
+                tk.Label(
+                    suggested_frame,
+                    text="+ Add:",
+                    bg=ModernStyle.ACCENT_GREEN,
+                    fg=ModernStyle.TEXT_PRIMARY,
+                    font=ModernStyle.FONT_SMALL
+                ).pack(anchor='w', padx=5, pady=2)
+                
+                tk.Text(
+                    suggested_frame,
+                    height=min(3, edit.suggested_code.count('\n') + 1),
+                    bg='#1b2d1b',
+                    fg=ModernStyle.TEXT_PRIMARY,
+                    font=ModernStyle.FONT_CODE,
+                    wrap=tk.NONE,
+                    state='normal'
+                ).pack(fill=tk.X, padx=5, pady=2)
+                
+                suggested_text = suggested_frame.winfo_children()[-1]
+                suggested_text.insert('1.0', edit.suggested_code)
+                suggested_text.config(state='disabled')
+                
+        elif edit.edit_type == 'insert':
+            # Show only suggested code for insertions
+            suggested_frame = tk.Frame(diff_frame, bg=ModernStyle.ACCENT_GREEN)
+            suggested_frame.pack(fill=tk.X, pady=1)
+            
+            tk.Label(
+                suggested_frame,
+                text=f"+ Insert at line {edit.line_start}:",
+                bg=ModernStyle.ACCENT_GREEN,
+                fg=ModernStyle.TEXT_PRIMARY,
+                font=ModernStyle.FONT_SMALL
+            ).pack(anchor='w', padx=5, pady=2)
+            
+            tk.Text(
+                suggested_frame,
+                height=min(3, edit.suggested_code.count('\n') + 1),
+                bg='#1b2d1b',
+                fg=ModernStyle.TEXT_PRIMARY,
+                font=ModernStyle.FONT_CODE,
+                wrap=tk.NONE,
+                state='normal'
+            ).pack(fill=tk.X, padx=5, pady=2)
+            
+            suggested_text = suggested_frame.winfo_children()[-1]
+            suggested_text.insert('1.0', edit.suggested_code)
+            suggested_text.config(state='disabled')
+            
+        elif edit.edit_type == 'delete':
+            # Show only original code for deletions
+            original_frame = tk.Frame(diff_frame, bg=ModernStyle.ACCENT_RED)
+            original_frame.pack(fill=tk.X, pady=1)
+            
+            tk.Label(
+                original_frame,
+                text=f"- Delete lines {edit.line_start}-{edit.line_end}:",
+                bg=ModernStyle.ACCENT_RED,
+                fg=ModernStyle.TEXT_PRIMARY,
+                font=ModernStyle.FONT_SMALL
+            ).pack(anchor='w', padx=5, pady=2)
+            
+            tk.Text(
+                original_frame,
+                height=min(3, edit.original_code.count('\n') + 1),
+                bg='#2d1b1b',
+                fg=ModernStyle.TEXT_PRIMARY,
+                font=ModernStyle.FONT_CODE,
+                wrap=tk.NONE,
+                state='normal'
+            ).pack(fill=tk.X, padx=5, pady=2)
+            
+            original_text = original_frame.winfo_children()[-1]
+            original_text.insert('1.0', edit.original_code)
+            original_text.config(state='disabled')
+            
+    def toggle_all_edits(self, edit_suggestions, select_all):
+        """Toggle all edit selections"""
+        for i in range(len(edit_suggestions)):
+            if i in self.edit_checkboxes:
+                self.edit_checkboxes[i].set(select_all)
+                edit_suggestions[i].selected = select_all
+                
+    def apply_selected_edits(self, edit_suggestions, preview_window):
+        """Apply the selected edits to the code"""
+        # Get selected edits
+        selected_edits = []
+        for i, edit in enumerate(edit_suggestions):
+            if i in self.edit_checkboxes and self.edit_checkboxes[i].get():
+                selected_edits.append(edit)
+                
+        if not selected_edits:
+            messagebox.showwarning("No Selection", "Please select at least one edit to apply.")
+            return
+            
+        # Sort edits by line number (descending) to avoid line number shifts
+        selected_edits.sort(key=lambda x: x.line_start, reverse=True)
+        
+        # Apply edits
+        try:
+            current_lines = self.code_text.get('1.0', 'end-1c').split('\n')
+            
+            for edit in selected_edits:
+                if edit.edit_type == 'replace':
+                    # Replace lines
+                    for line_num in range(edit.line_start - 1, edit.line_end):
+                        if line_num < len(current_lines):
+                            current_lines[line_num] = ''  # Mark for removal
+                    
+                    # Insert new content at the first line
+                    if edit.line_start - 1 < len(current_lines):
+                        current_lines[edit.line_start - 1] = edit.suggested_code
+                        
+                elif edit.edit_type == 'insert':
+                    # Insert new lines
+                    insert_pos = min(edit.line_start - 1, len(current_lines))
+                    current_lines.insert(insert_pos, edit.suggested_code)
+                    
+                elif edit.edit_type == 'delete':
+                    # Delete lines
+                    for line_num in range(edit.line_start - 1, edit.line_end):
+                        if line_num < len(current_lines):
+                            current_lines[line_num] = ''  # Mark for removal
+            
+            # Remove empty lines that were marked for deletion
+            current_lines = [line for line in current_lines if line != '']
+            
+            # Update the editor
+            new_content = '\n'.join(current_lines)
+            self.code_text.delete('1.0', 'end')
+            self.code_text.insert('1.0', new_content)
+            
+            # Update UI
+            self.update_line_numbers()
+            self.is_modified = True
+            self.update_title()
+            
+            # Close preview window
+            preview_window.destroy()
+            
+            # Show success message
+            self.status_bar.config(text=f"Applied {len(selected_edits)} changes successfully")
+            
+            # Clear AI prompt
+            self.ai_prompt_var.set("")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error applying edits: {str(e)}")
+            
+    def configure_api_key(self):
+        """Configure the Gemini API key"""
+        new_key = simpledialog.askstring(
+            "Configure API Key",
+            "Enter your Gemini API key:",
+            show='*',
+            initialvalue=self.api_key if self.api_key else ""
+        )
+        
+        if new_key:
+            self.api_key = new_key
+            self.setup_gemini()
+            
+    def test_ai_connection(self):
+        """Test the AI connection"""
+        if not self.gemini_model:
+            messagebox.showerror("Error", "AI model not configured. Please set your API key first.")
+            return
+            
+        try:
+            test_response = self.gemini_model.generate_content("Hello, please respond with 'Connection successful'")
+            messagebox.showinfo("Connection Test", f"AI Response: {test_response.text}")
+        except Exception as e:
+            messagebox.showerror("Connection Test Failed", f"Error: {str(e)}")
+            
+    def on_enter_pressed(self, event):
+        """Handle Enter key press in AI prompt"""
+        if (event.widget == self.ai_prompt_entry and 
+            not self.is_ai_processing and 
+            self.ai_prompt_var.get().strip()):
+            self.ask_ai()
+            
+    def on_closing(self):
+        """Handle application closing"""
+        if self.is_modified and not self.confirm_unsaved_changes():
+            return
+            
+        self.root.destroy()
+        
+    def run(self):
+        """Start the application"""
+        self.root.mainloop()
+
+
+def main():
+    """Main function to run the application"""
+    # Check for required dependencies
+    missing_deps = []
+    
+    if not GENAI_AVAILABLE:
+        missing_deps.append("google-generativeai")
+    if not PYGMENTS_AVAILABLE:
+        missing_deps.append("pygments")
+    
+    if missing_deps:
+        print("Missing dependencies. Installing...")
+        print(f"Please run: pip install {' '.join(missing_deps)}")
+        
+        # Try to install automatically
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing_deps)
+            print("Dependencies installed successfully. Please restart the application.")
+            return
+        except subprocess.CalledProcessError:
+            print("Failed to install dependencies automatically.")
+            print(f"Please manually run: pip install {' '.join(missing_deps)}")
+            return
+    
+    # Create and run the application
+    app = AICodeEditor()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
