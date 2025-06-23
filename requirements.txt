@@ -1,0 +1,10 @@
+google-genai
+Pillow
+Pygments
+PySimpleGUI
+fastapi
+uvicorn
+pydantic
+rich
+watchdog
+aioschedule
