@@ -14,7 +14,6 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-import re # For cleanup logic
 
 # Import required libraries with fallback handling
 try:
@@ -810,88 +809,25 @@ User request: {prompt}"""
 
         self.applied_edit_indices.add(edit_index)
 
-    def cleanup_code_post_edit(self, code_content: str) -> str:
-        cleaned_lines = [] # Ensure this is the very first line of substantive code.
-        # Pass 1: Remove duplicate signatures (existing logic)
-        lines = code_content.split('\n')
-        i = 0
-        while i < len(lines):
-            line_a = lines[i]
+    def check_syntax(self, code_content: str) -> Optional[str]:
+        """
+        Checks Python code content for syntax errors.
+        Returns a formatted error message string if a SyntaxError is found,
+        otherwise returns None.
+        """
+        try:
+            compile(code_content, '<string>', 'exec')
+            return None
+        except SyntaxError as e:
+            error_message = f"Error: {e.msg}\n"
+            if e.lineno is not None:
+                error_message += f"Line: {e.lineno}\n"
+            if e.offset is not None:
+                error_message += f"Offset: {e.offset}\n"
+            if e.text is not None:
+                error_message += f"Code: {e.text.strip()}"
+            return error_message
 
-            # Regex to capture 'def func_name(params):' or 'def func_name(params) -> type:'
-            # Captures: 1=indent, 2=full_def_line, 3=func_name, 4=params_with_parens_and_return_type, 5=colon_and_rest (should be just colon)
-            func_def_pattern = r"^(\s*)(def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(\((?:[^)]|\([^)]*\))*\)\s*(?:->\s*[\w\.\[\], \s]+)?)\s*:)"
-            match_a = re.match(func_def_pattern, line_a)
-
-            if match_a:
-                indent_a = match_a.group(1)
-                func_name_a = match_a.group(3)
-                # Group 4 contains params and optional return type, e.g., "(param1: int, param2) -> str"
-                params_and_return_a_str = match_a.group(4)
-
-                # Look for the next non-empty line, collecting any blank lines in between
-                temp_intermediate_lines = []
-                j = i + 1
-                line_b_content = None
-                while j < len(lines):
-                    if lines[j].strip():
-                        line_b_content = lines[j]
-                        break
-                    temp_intermediate_lines.append(lines[j]) # Store blank line
-                    j += 1
-
-                if line_b_content is not None:
-                    match_b = re.match(func_def_pattern, line_b_content)
-                    if match_b:
-                        indent_b = match_b.group(1)
-                        func_name_b = match_b.group(3)
-                        params_and_return_b_str = match_b.group(4)
-
-                        if indent_a == indent_b and func_name_a == func_name_b:
-                            is_b_more_complete = False
-                            # Check for presence of return type hint "->"
-                            has_return_b = "->" in params_and_return_b_str
-                            has_return_a = "->" in params_and_return_a_str
-                            if has_return_b and not has_return_a:
-                                is_b_more_complete = True
-
-                            if not is_b_more_complete:
-                                # Check for presence of parameter type hints ": "
-                                # This is a simplification; proper parsing would be more robust.
-                                has_param_typing_b = ": " in params_and_return_b_str
-                                has_param_typing_a = ": " in params_and_return_a_str
-                                if has_param_typing_b and not has_param_typing_a:
-                                    is_b_more_complete = True
-
-                            if not is_b_more_complete:
-                                # Compare length of the params + return string as a heuristic
-                                # Add a bias if B has type hints and A doesn't, or if B has return and A doesn't
-                                len_a = len(params_and_return_a_str)
-                                len_b = len(params_and_return_b_str)
-                                if has_param_typing_b and not has_param_typing_a: len_b += 5 # Arbitrary bonus
-                                if has_return_b and not has_return_a: len_b += 5 # Arbitrary bonus
-
-                                if len_b > len_a + 1 : # B is significantly longer
-                                    is_b_more_complete = True
-
-                            if not is_b_more_complete:
-                                # Case: A is '()' and has no types/return, B is not '()' or has types/return
-                                is_a_simple_empty_params = params_and_return_a_str == "()" and not has_return_a and not (": " in params_and_return_a_str)
-                                is_b_complex_or_has_types = params_and_return_b_str != "()" or has_return_b or (": " in params_and_return_b_str)
-                                if is_a_simple_empty_params and is_b_complex_or_has_types:
-                                    is_b_more_complete = True
-
-                            if is_b_more_complete:
-                                cleaned_lines.extend(temp_intermediate_lines) # Add collected blank lines
-                                cleaned_lines.append(line_b_content) # Ensure this appends to cleaned_lines
-                                i = j + 1
-                                continue
-
-            cleaned_lines.append(line_a) # Ensure this appends to cleaned_lines
-            i += 1
-
-        return "\n".join(cleaned_lines) # Ensure this joins cleaned_lines
-        
     def show_edit_preview(self, analysis, edit_suggestions):
         """Show edit preview dialog"""
         if not edit_suggestions:
@@ -1237,89 +1173,78 @@ User request: {prompt}"""
                 # So, updating edit_suggestions[i].selected here is redundant.
                 
     def apply_selected_edits(self, edit_suggestions, preview_window):
-        """Apply the selected edits to the code"""
-        # Get selected edits
-        selected_edits = []
-        for i, edit in enumerate(edit_suggestions):
-            if i in self.edit_checkboxes and self.edit_checkboxes[i].get():
-                selected_edits.append(edit)
-                
-        if not selected_edits:
-            messagebox.showwarning("No Selection", "Please select at least one edit to apply.", parent=preview_window)
+        # 1) collect selected edits
+        selected = [
+            e for i, e in enumerate(edit_suggestions)
+            if i in self.edit_checkboxes and self.edit_checkboxes[i].get()
+        ]
+        if not selected:
+            messagebox.showwarning("No Selection",
+                                   "Select at least one edit to apply.",
+                                   parent=preview_window)
             return
-            
-        # Sort edits by line number (descending) to avoid line number shifts
-        selected_edits.sort(key=lambda x: x.line_start, reverse=True)
-        
-        # Apply edits
-        try:
-            current_lines = self.code_text.get('1.0', 'end-1c').split('\n')
-            
-            for edit in selected_edits:
-                # Line numbers from AI are 1-based, convert to 0-based for list indexing
-                start_index = edit.line_start - 1
-                end_index = edit.line_end - 1 # For deletion/replacement, this is the last line to remove
 
-                if edit.edit_type == 'replace':
-                    # Validate line numbers
-                    if not (0 <= start_index < len(current_lines) and 0 <= end_index < len(current_lines) and start_index <= end_index):
-                        print(f"Warning: Invalid line numbers for replace: {edit.line_start}-{edit.line_end}. Skipping edit.")
-                        continue
+        # Store original content for potential revert
+        original_content = self.code_text.get('1.0', 'end-1c')
 
-                    # Remove original lines (from start_index to end_index inclusive)
-                    del current_lines[start_index : end_index + 1]
-                    
-                    # Insert new lines (split suggested code into lines)
-                    suggested_lines = edit.suggested_code.split('\n')
-                    for i, line_content in enumerate(suggested_lines):
-                        current_lines.insert(start_index + i, line_content)
-                        
-                elif edit.edit_type == 'insert':
-                    # Validate line number (insertion happens *before* this line)
-                    # So, if line_start is 1, it inserts at index 0.
-                    # If line_start is len(current_lines) + 1, it inserts at the end.
-                    insert_at_index = edit.line_start - 1
-                    if not (0 <= insert_at_index <= len(current_lines)):
-                        print(f"Warning: Invalid line number for insert: {edit.line_start}. Skipping edit.")
-                        continue
+        # 2) apply each as a pure text replacement of original_code → suggested_code
+        content_after_edits = original_content
+        for edit in selected:
+            if edit.edit_type == 'replace':
+                content_after_edits = content_after_edits.replace(edit.original_code, edit.suggested_code)
+            elif edit.edit_type == 'delete':
+                content_after_edits = content_after_edits.replace(edit.original_code, "")
+            elif edit.edit_type == 'insert':
+                # insertions have original_code == ""
+                # we insert *before* the line number:
+                lines = content_after_edits.split('\n')
+                idx = max(0, min(len(lines), edit.line_start - 1))
+                before, after = lines[:idx], lines[idx:]
+                new_block = edit.suggested_code.split('\n')
+                content_after_edits = '\n'.join(before + new_block + after)
+            else:
+                # unknown edit_type
+                continue
 
-                    suggested_lines = edit.suggested_code.split('\n')
-                    for i, line_content in enumerate(suggested_lines):
-                        current_lines.insert(insert_at_index + i, line_content)
-                    
-                elif edit.edit_type == 'delete':
-                    # Validate line numbers
-                    if not (0 <= start_index < len(current_lines) and 0 <= end_index < len(current_lines) and start_index <= end_index):
-                        print(f"Warning: Invalid line numbers for delete: {edit.line_start}-{edit.line_end}. Skipping edit.")
-                        continue
-                        
-                    # Delete lines (from start_index to end_index inclusive)
-                    del current_lines[start_index : end_index + 1]
-            
-            # Update the editor
-            new_content = '\n'.join(current_lines)
-            cleaned_content = self.cleanup_code_post_edit(new_content)
+        # 3) dedupe imports
+        seen_imports = set()
+        out_lines = []
+        for line in content_after_edits.split('\n'):
+            s = line.strip()
+            if s.startswith("import ") or s.startswith("from "):
+                if s in seen_imports:
+                    continue
+                seen_imports.add(s)
+            out_lines.append(line)
+        cleaned_content_final = '\n'.join(out_lines)
+
+        # 4) Check syntax of the cleaned content
+        syntax_error_message = self.check_syntax(cleaned_content_final)
+
+        if syntax_error_message:
+            # Revert to original content
             self.code_text.delete('1.0', 'end')
-            self.code_text.insert('1.0', cleaned_content)
+            self.code_text.insert('1.0', original_content)
             
-            # Update UI
+            # Inform user
+            messagebox.showerror(
+                "Syntax Error",
+                f"The AI's suggestion resulted in a syntax error:\n\n{syntax_error_message}\n\nThe changes have been reverted. Please try refining your request or ask the AI to fix the previous error.",
+                parent=preview_window  # Show message box on top of preview
+            )
+            preview_window.destroy() # Close preview window
+            self.status_bar.config(text="AI edit failed due to syntax error; changes reverted.")
+            self.ai_prompt_var.set("") # Clear prompt as the action is complete (though failed)
+        else:
+            # No syntax error, apply changes and update UI
+            self.code_text.delete('1.0', 'end')
+            self.code_text.insert('1.0', cleaned_content_final)
             self.update_line_numbers()
             self.is_modified = True
             self.update_title()
-            
-            # Close preview window
             preview_window.destroy()
-            
-            # Show success message
-            self.status_bar.config(text=f"Applied {len(selected_edits)} changes successfully")
-            
-            # Clear AI prompt
+            self.status_bar.config(text=f"Applied {len(selected)} changes successfully")
             self.ai_prompt_var.set("")
-            
-        except Exception as e:
-            # If preview_window is already destroyed, parent to self.root
-            parent_window = self.root if not preview_window.winfo_exists() else preview_window
-            messagebox.showerror("Error", f"Error applying edits: {str(e)}", parent=parent_window)
             
     def configure_api_key(self):
         """Configure the Gemini API key"""
