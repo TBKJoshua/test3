@@ -680,21 +680,22 @@ Rules:
 - Match original code exactly (including whitespace)
 - Focus on the specific user request
 - Only suggest changes that directly address the request
+- **JSON STRING ESCAPING**: When providing multi-line code in `original_code` or `suggested_code` JSON fields, ensure all newline characters are escaped as `\\n`, and all double quotes (`"`) within the code are escaped as `\\\"`. This is critical for valid JSON.
 
 - **IF YOU DECIDE TO REPLACE AN ENTIRE FUNCTION/METHOD (e.g., user asks to refactor or add features to a whole function):**
     1. First, internally generate the complete new version of the function.
     2. Then, carefully identify the *exact* starting line (e.g., `def function_name(...):`) and the *exact* ending line of the ORIGINAL function/method in the provided code.
     3. `line_start` in your JSON output MUST be the line number of the original function's/method's starting `def` line.
     4. `line_end` in your JSON output MUST be the line number of the original function's/method's final line (including all its body).
-    5. `original_code` in your JSON MUST be the complete, verbatim text of the entire original function/method from `line_start` to `line_end`.
-    6. `suggested_code` in your JSON MUST be the complete new version of the entire function/method you generated in step 1.
+    5. `original_code` in your JSON MUST be the complete, verbatim text of the entire original function/method from `line_start` to `line_end`. (Remember to escape this string for JSON: `\\n` for newlines, `\\\"` for quotes).
+    6. `suggested_code` in your JSON MUST be the complete new version of the entire function/method you generated in step 1. (Remember to escape this string for JSON).
     7. Set `edit_type: "replace"`.
     8. **CRUCIAL**: Your `suggested_code` must be self-contained and a full replacement. Do not let any part of the old function's body automatically carry over unless it's explicitly part of your new `suggested_code`.
     9. Ensure standard Python PEP 8 spacing (e.g., typically two blank lines) between top-level function/class definitions if your `suggested_code` replaces a block and affects this spacing.
 
 - **FOR SMALLER, TARGETED CHANGES (e.g., fixing a typo on a single line, changing one expression, adding a parameter with its type hint):**
-    1. Precisely identify `line_start`, `line_end` (often the same for single-line changes), and the exact `original_code` for the small segment.
-    2. Provide the `suggested_code` for that specific segment.
+    1. Precisely identify `line_start`, `line_end` (often the same for single-line changes), and the exact `original_code` for the small segment. (Escape for JSON if it contains newlines/quotes).
+    2. Provide the `suggested_code` for that specific segment. (Escape for JSON).
     3. Set `edit_type: "replace"` (or "insert"/"delete" if more appropriate for the very specific small change).
     4. This mode is for surgical changes that do NOT replace an entire function body.
 
