@@ -14,8 +14,6 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-import re
-
 import re # For cleanup logic
 
 # Import required libraries with fallback handling
@@ -800,136 +798,24 @@ User request: {prompt}"""
 
         self.applied_edit_indices.add(edit_index)
 
-    def _apply_pep8_spacing(self, code_content: str) -> str:
-        lines = code_content.split('\n')
-        if not lines:
-            return ""
-
-        processed_lines = []
-
-        def get_line_type(line_text: str) -> tuple[str | None, int]:
-            stripped_line = line_text.strip()
-            if not stripped_line:
-                return "blank", 0
-
-            indent = len(line_text) - len(line_text.lstrip())
-
-            if stripped_line.startswith("#"):
-                return "comment", indent
-
-            if re.match(r"^(async\s+)?def\s+[\w_]+\s*\(.*\):", stripped_line):
-                return "def", indent
-            if re.match(r"^class\s+[\w_]+\s*\(?.*\)?;?:", stripped_line):
-                return "class", indent
-            if re.match(r"^from\s+.*import.*|^import\s+.*", stripped_line):
-                return "import", indent
-
-            return "other", indent
-
-        last_significant_line_type: Optional[str] = None
-
-        # Always add the first line if it's not blank, or handle if it is
-        if lines[0].strip():
-            processed_lines.append(lines[0])
-            last_significant_line_type, _ = get_line_type(lines[0])
-
-        for i in range(1, len(lines)):
-            current_line_text = lines[i]
-            current_type, current_indent = get_line_type(current_line_text)
-            prev_line_text = lines[i-1] # The actual previous line
-            prev_type_actual, _ = get_line_type(prev_line_text)
-
-            if current_type == "blank":
-                # Only add a blank line if the last added line wasn't already blank
-                if processed_lines and processed_lines[-1].strip():
-                    processed_lines.append("")
-                last_significant_line_type = "blank" # Treat consecutive blanks as one for spacing rules
-                continue
-
-            required_blanks = 0
-            if current_type in ["def", "class"] and current_indent == 0: # Top-level
-                if last_significant_line_type == "import":
-                    required_blanks = 2
-                elif last_significant_line_type is not None and last_significant_line_type != "blank":
-                    required_blanks = 2
-                elif last_significant_line_type is None and i > 0: # File started with blanks
-                     required_blanks = 0 # No blanks before first code element if it's top-level
-                elif i == 0: # First line of file
-                    required_blanks = 0
-
-            elif current_type == "def" and current_indent > 0: # Method
-                 # This needs context of being inside a class, which is hard here.
-                 # Simplified: if previous significant (non-blank, non-comment) was not 'class' or 'def' at same/lesser indent
-                if last_significant_line_type not in ["blank", "comment", "class"] and \
-                   (prev_type_actual not in ["def", "class"] or get_line_type(processed_lines[-1] if processed_lines else "")[1] < current_indent) : # Check indent of last written line
-                    required_blanks = 1
-
-            # Remove existing blank lines at the end of processed_lines
-            # then add the required ones.
-            actual_blanks_at_end = 0
-            while processed_lines and not processed_lines[-1].strip():
-                processed_lines.pop()
-                actual_blanks_at_end +=1
-
-            # Add new blank lines
-            for _ in range(required_blanks):
-                processed_lines.append("")
-
-            processed_lines.append(current_line_text)
-
-            if current_type not in ["blank", "comment"]:
-                last_significant_line_type = current_type
-
-        # Join and then re-split to normalize multiple blank lines down to max 2 between blocks, 1 in methods.
-        # This is a bit of a cheat to simplify the above logic's output.
-        temp_joined = "\n".join(processed_lines)
-        final_lines = []
-        blank_line_count = 0
-        for line in temp_joined.split('\n'):
-            if not line.strip():
-                blank_line_count += 1
-            else:
-                # Determine max allowed blanks before this line
-                line_type, line_indent = get_line_type(line)
-                max_blanks = 1
-                if line_type in ["def", "class"] and line_indent == 0:
-                    max_blanks = 2
-
-                # Add appropriate number of blanks
-                for _ in range(min(blank_line_count, max_blanks)):
-                    final_lines.append("")
-                final_lines.append(line)
-                blank_line_count = 0
-
-        # Add trailing blank lines (up to 1, as per PEP8 for end of file)
-        if blank_line_count > 0 and final_lines: # only if there was content before blanks
-            final_lines.append("")
-
-        # Ensure single newline at EOF if content exists
-        result = "\n".join(final_lines)
-        if result and not result.endswith("\n"):
-            result += "\n"
-
-        return result if result.strip() else code_content # Avoid blanking if was all whitespace
-
     def cleanup_code_post_edit(self, code_content: str) -> str:
+        cleaned_lines = [] # Ensure this is the very first line of substantive code.
         # Pass 1: Remove duplicate signatures (existing logic)
         lines = code_content.split('\n')
-        cleaned_lines_pass1 = []
         i = 0
         while i < len(lines):
             line_a = lines[i]
 
-            # Regex to capture 'def func_name(params):'
-            # Captures: 1=indent, 2=full_def_line, 3=func_name, 4=params_with_parens, 5=colon_and_rest_of_line
-            func_def_pattern = r"^(\s*)(def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(\(.*\))(:.*)?)$"
+            # Regex to capture 'def func_name(params):' or 'def func_name(params) -> type:'
+            # Captures: 1=indent, 2=full_def_line, 3=func_name, 4=params_with_parens_and_return_type, 5=colon_and_rest (should be just colon)
+            func_def_pattern = r"^(\s*)(def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(\((?:[^)]|\([^)]*\))*\)\s*(?:->\s*[\w\.\[\], \s]+)?)\s*:)"
             match_a = re.match(func_def_pattern, line_a)
 
             if match_a:
                 indent_a = match_a.group(1)
                 func_name_a = match_a.group(3)
-                params_a_str = match_a.group(4)
-                signature_suffix_a = match_a.group(5) if match_a.group(5) else ""
+                # Group 4 contains params and optional return type, e.g., "(param1: int, param2) -> str"
+                params_and_return_a_str = match_a.group(4)
 
                 # Look for the next non-empty line, collecting any blank lines in between
                 temp_intermediate_lines = []
@@ -947,42 +833,52 @@ User request: {prompt}"""
                     if match_b:
                         indent_b = match_b.group(1)
                         func_name_b = match_b.group(3)
-                        params_b_str = match_b.group(4)
-                        signature_suffix_b = match_b.group(5) if match_b.group(5) else ""
+                        params_and_return_b_str = match_b.group(4)
 
                         if indent_a == indent_b and func_name_a == func_name_b:
                             is_b_more_complete = False
-                            has_return_b = "->" in params_b_str or "->" in signature_suffix_b
-                            has_return_a = "->" in params_a_str or "->" in signature_suffix_a
+                            # Check for presence of return type hint "->"
+                            has_return_b = "->" in params_and_return_b_str
+                            has_return_a = "->" in params_and_return_a_str
                             if has_return_b and not has_return_a:
                                 is_b_more_complete = True
 
                             if not is_b_more_complete:
-                                has_param_typing_b = ": " in params_b_str
-                                has_param_typing_a = ": " in params_a_str
+                                # Check for presence of parameter type hints ": "
+                                # This is a simplification; proper parsing would be more robust.
+                                has_param_typing_b = ": " in params_and_return_b_str
+                                has_param_typing_a = ": " in params_and_return_a_str
                                 if has_param_typing_b and not has_param_typing_a:
                                     is_b_more_complete = True
 
                             if not is_b_more_complete:
-                                if len(params_b_str) > len(params_a_str) + 1 and \
-                                   (has_return_b or (": " in params_b_str)): # Be a bit stricter
+                                # Compare length of the params + return string as a heuristic
+                                # Add a bias if B has type hints and A doesn't, or if B has return and A doesn't
+                                len_a = len(params_and_return_a_str)
+                                len_b = len(params_and_return_b_str)
+                                if has_param_typing_b and not has_param_typing_a: len_b += 5 # Arbitrary bonus
+                                if has_return_b and not has_return_a: len_b += 5 # Arbitrary bonus
+
+                                if len_b > len_a + 1 : # B is significantly longer
                                     is_b_more_complete = True
 
-                            if not is_b_more_complete and \
-                               (params_a_str == "()" and not has_return_a and not (": " in params_a_str)) and \
-                               (params_b_str != "()" or has_return_b or (": " in params_b_str)):
-                                is_b_more_complete = True
+                            if not is_b_more_complete:
+                                # Case: A is '()' and has no types/return, B is not '()' or has types/return
+                                is_a_simple_empty_params = params_and_return_a_str == "()" and not has_return_a and not (": " in params_and_return_a_str)
+                                is_b_complex_or_has_types = params_and_return_b_str != "()" or has_return_b or (": " in params_and_return_b_str)
+                                if is_a_simple_empty_params and is_b_complex_or_has_types:
+                                    is_b_more_complete = True
 
                             if is_b_more_complete:
                                 cleaned_lines.extend(temp_intermediate_lines) # Add collected blank lines
-                                cleaned_lines.append(line_b_content)
+                                cleaned_lines.append(line_b_content) # Ensure this appends to cleaned_lines
                                 i = j + 1
                                 continue
 
-            cleaned_lines.append(line_a)
+            cleaned_lines.append(line_a) # Ensure this appends to cleaned_lines
             i += 1
 
-        return "\n".join(cleaned_lines)
+        return "\n".join(cleaned_lines) # Ensure this joins cleaned_lines
         
     def show_edit_preview(self, analysis, edit_suggestions):
         """Show edit preview dialog"""
@@ -1324,7 +1220,9 @@ User request: {prompt}"""
         for i in range(len(edit_suggestions)):
             if i in self.edit_checkboxes:
                 self.edit_checkboxes[i].set(select_all)
-                edit_suggestions[i].selected = select_all
+                # edit_suggestions[i].selected is not directly used by apply_selected_edits,
+                # which relies on the BooleanVar from self.edit_checkboxes.
+                # So, updating edit_suggestions[i].selected here is redundant.
                 
     def apply_selected_edits(self, edit_suggestions, preview_window):
         """Apply the selected edits to the code"""
