@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import re
 
+import re # For cleanup logic
+
 # Import required libraries with fallback handling
 try:
     import google.generativeai as genai
@@ -128,7 +130,7 @@ class AICodeEditor:
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
                 self.ai_status_label.config(
                     text="AI: Connected ✓", 
                     foreground=ModernStyle.ACCENT_GREEN
@@ -218,10 +220,13 @@ class AICodeEditor:
         
     def create_ai_prompt_section(self):
         """Create the AI prompt input section"""
-        ai_frame = tk.Frame(self.root, bg=ModernStyle.BG_PANEL, height=60)
+        ai_frame = tk.Frame(self.root, bg=ModernStyle.BG_PANEL) # No fixed height, allow propagation
         ai_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        ai_frame.grid_propagate(False)
-        ai_frame.grid_columnconfigure(1, weight=1)
+        # Ensure the frame column holding the entry can expand if needed.
+        # Entry is in column 0, spanning 2 (effectively using 0 and 1), button in 2.
+        # So, column 0 of ai_frame should have weight if we want entry to expand.
+        # Or, more simply, let column 1 (which is part of entry's span) take the weight.
+        ai_frame.grid_columnconfigure(1, weight=1) # Original configuration
         
         # Label
         tk.Label(
@@ -230,7 +235,7 @@ class AICodeEditor:
             bg=ModernStyle.BG_PANEL,
             fg=ModernStyle.TEXT_PRIMARY,
             font=ModernStyle.FONT_MAIN
-        ).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ).grid(row=0, column=0, sticky="w", padx=5, pady=5) # Label in column 0
         
         # Input field
         self.ai_prompt_var = tk.StringVar()
@@ -242,15 +247,22 @@ class AICodeEditor:
             font=ModernStyle.FONT_MAIN,
             relief='solid',
             borderwidth=1,
-            insertbackground=ModernStyle.TEXT_PRIMARY
+            insertbackground=ModernStyle.TEXT_PRIMARY,
+            state=tk.NORMAL
         )
-        self.ai_prompt_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        # Add some internal padding to make the entry taller and easier to click
+        self.ai_prompt_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=(5,10), ipady=8) # Increased ipady
         
+        if hasattr(self, 'ai_prompt_entry') and self.ai_prompt_entry.winfo_exists():
+            self.ai_prompt_entry.focus_set() # Use focus_set, not focus_force
+        else:
+            print("DEBUG: ai_prompt_entry was not created or accessible when focus_set was attempted.")
+
         # Ask AI Button
         self.ask_ai_btn = tk.Button(
             ai_frame,
             text="🤖 Ask AI",
-            command=self.ask_ai,
+            command=self.ask_ai, # Restore command
             bg=ModernStyle.ACCENT_BLUE,
             fg=ModernStyle.TEXT_PRIMARY,
             font=ModernStyle.FONT_MAIN,
@@ -660,6 +672,25 @@ Rules:
 - Focus on the specific user request
 - Only suggest changes that directly address the request
 
+- **IF YOU DECIDE TO REPLACE AN ENTIRE FUNCTION/METHOD (e.g., user asks to refactor or add features to a whole function):**
+    1. First, internally generate the complete new version of the function.
+    2. Then, carefully identify the *exact* starting line (e.g., `def function_name(...):`) and the *exact* ending line of the ORIGINAL function/method in the provided code.
+    3. `line_start` in your JSON output MUST be the line number of the original function's/method's starting `def` line.
+    4. `line_end` in your JSON output MUST be the line number of the original function's/method's final line (including all its body).
+    5. `original_code` in your JSON MUST be the complete, verbatim text of the entire original function/method from `line_start` to `line_end`.
+    6. `suggested_code` in your JSON MUST be the complete new version of the entire function/method you generated in step 1.
+    7. Set `edit_type: "replace"`.
+    8. **CRUCIAL**: Your `suggested_code` must be self-contained and a full replacement. Do not let any part of the old function's body automatically carry over unless it's explicitly part of your new `suggested_code`.
+    9. Ensure standard Python PEP 8 spacing (e.g., typically two blank lines) between top-level function/class definitions if your `suggested_code` replaces a block and affects this spacing.
+
+- **FOR SMALLER, TARGETED CHANGES (e.g., fixing a typo on a single line, changing one expression, adding a parameter with its type hint):**
+    1. Precisely identify `line_start`, `line_end` (often the same for single-line changes), and the exact `original_code` for the small segment.
+    2. Provide the `suggested_code` for that specific segment.
+    3. Set `edit_type: "replace"` (or "insert"/"delete" if more appropriate for the very specific small change).
+    4. This mode is for surgical changes that do NOT replace an entire function body.
+
+- **AVOID DUPLICATION**: Do not suggest inserting a new function if the user's intent is to modify an existing one. Prefer replacing using the guidelines above.
+
 Current code:
 ```python
 {current_code}
@@ -733,6 +764,225 @@ User request: {prompt}"""
         self.is_ai_processing = False
         if status_message:
             self.status_bar.config(text=status_message)
+
+    def apply_single_edit_action(self, edit_index: int, preview_window_ref):
+        """Handles the 'Apply this Fix' button click on a card."""
+        if edit_index in self.applied_edit_indices:
+            # Optionally show a message, or just do nothing if already actioned
+            # messagebox.showinfo("Info", "This suggestion has already been actioned.", parent=preview_window_ref)
+            return
+
+        self.edit_checkboxes[edit_index].set(True)  # Check the box
+
+        card_widgets = self.edit_card_widgets.get(edit_index)
+        if card_widgets:
+            card_widgets['apply_button'].config(state='disabled', text="Selected ✓")
+            card_widgets['skip_button'].config(state='disabled')
+            # Optional: disable checkbox to prevent further changes after card button click
+            # card_widgets['checkbox_widget'].config(state='disabled')
+
+        self.applied_edit_indices.add(edit_index)
+
+    def skip_single_edit_action(self, edit_index: int, preview_window_ref):
+        """Handles the 'Skip this Fix' button click on a card."""
+        if edit_index in self.applied_edit_indices:
+            # messagebox.showinfo("Info", "This suggestion has already been actioned.", parent=preview_window_ref)
+            return
+
+        self.edit_checkboxes[edit_index].set(False)  # Uncheck the box
+
+        card_widgets = self.edit_card_widgets.get(edit_index)
+        if card_widgets:
+            card_widgets['apply_button'].config(state='disabled')
+            card_widgets['skip_button'].config(state='disabled', text="Skipped ✕")
+            # Optional: disable checkbox
+            # card_widgets['checkbox_widget'].config(state='disabled')
+
+        self.applied_edit_indices.add(edit_index)
+
+    def _apply_pep8_spacing(self, code_content: str) -> str:
+        lines = code_content.split('\n')
+        if not lines:
+            return ""
+
+        processed_lines = []
+
+        def get_line_type(line_text: str) -> tuple[str | None, int]:
+            stripped_line = line_text.strip()
+            if not stripped_line:
+                return "blank", 0
+
+            indent = len(line_text) - len(line_text.lstrip())
+
+            if stripped_line.startswith("#"):
+                return "comment", indent
+
+            if re.match(r"^(async\s+)?def\s+[\w_]+\s*\(.*\):", stripped_line):
+                return "def", indent
+            if re.match(r"^class\s+[\w_]+\s*\(?.*\)?;?:", stripped_line):
+                return "class", indent
+            if re.match(r"^from\s+.*import.*|^import\s+.*", stripped_line):
+                return "import", indent
+
+            return "other", indent
+
+        last_significant_line_type: Optional[str] = None
+
+        # Always add the first line if it's not blank, or handle if it is
+        if lines[0].strip():
+            processed_lines.append(lines[0])
+            last_significant_line_type, _ = get_line_type(lines[0])
+
+        for i in range(1, len(lines)):
+            current_line_text = lines[i]
+            current_type, current_indent = get_line_type(current_line_text)
+            prev_line_text = lines[i-1] # The actual previous line
+            prev_type_actual, _ = get_line_type(prev_line_text)
+
+            if current_type == "blank":
+                # Only add a blank line if the last added line wasn't already blank
+                if processed_lines and processed_lines[-1].strip():
+                    processed_lines.append("")
+                last_significant_line_type = "blank" # Treat consecutive blanks as one for spacing rules
+                continue
+
+            required_blanks = 0
+            if current_type in ["def", "class"] and current_indent == 0: # Top-level
+                if last_significant_line_type == "import":
+                    required_blanks = 2
+                elif last_significant_line_type is not None and last_significant_line_type != "blank":
+                    required_blanks = 2
+                elif last_significant_line_type is None and i > 0: # File started with blanks
+                     required_blanks = 0 # No blanks before first code element if it's top-level
+                elif i == 0: # First line of file
+                    required_blanks = 0
+
+            elif current_type == "def" and current_indent > 0: # Method
+                 # This needs context of being inside a class, which is hard here.
+                 # Simplified: if previous significant (non-blank, non-comment) was not 'class' or 'def' at same/lesser indent
+                if last_significant_line_type not in ["blank", "comment", "class"] and \
+                   (prev_type_actual not in ["def", "class"] or get_line_type(processed_lines[-1] if processed_lines else "")[1] < current_indent) : # Check indent of last written line
+                    required_blanks = 1
+
+            # Remove existing blank lines at the end of processed_lines
+            # then add the required ones.
+            actual_blanks_at_end = 0
+            while processed_lines and not processed_lines[-1].strip():
+                processed_lines.pop()
+                actual_blanks_at_end +=1
+
+            # Add new blank lines
+            for _ in range(required_blanks):
+                processed_lines.append("")
+
+            processed_lines.append(current_line_text)
+
+            if current_type not in ["blank", "comment"]:
+                last_significant_line_type = current_type
+
+        # Join and then re-split to normalize multiple blank lines down to max 2 between blocks, 1 in methods.
+        # This is a bit of a cheat to simplify the above logic's output.
+        temp_joined = "\n".join(processed_lines)
+        final_lines = []
+        blank_line_count = 0
+        for line in temp_joined.split('\n'):
+            if not line.strip():
+                blank_line_count += 1
+            else:
+                # Determine max allowed blanks before this line
+                line_type, line_indent = get_line_type(line)
+                max_blanks = 1
+                if line_type in ["def", "class"] and line_indent == 0:
+                    max_blanks = 2
+
+                # Add appropriate number of blanks
+                for _ in range(min(blank_line_count, max_blanks)):
+                    final_lines.append("")
+                final_lines.append(line)
+                blank_line_count = 0
+
+        # Add trailing blank lines (up to 1, as per PEP8 for end of file)
+        if blank_line_count > 0 and final_lines: # only if there was content before blanks
+            final_lines.append("")
+
+        # Ensure single newline at EOF if content exists
+        result = "\n".join(final_lines)
+        if result and not result.endswith("\n"):
+            result += "\n"
+
+        return result if result.strip() else code_content # Avoid blanking if was all whitespace
+
+    def cleanup_code_post_edit(self, code_content: str) -> str:
+        # Pass 1: Remove duplicate signatures (existing logic)
+        lines = code_content.split('\n')
+        cleaned_lines_pass1 = []
+        i = 0
+        while i < len(lines):
+            line_a = lines[i]
+
+            # Regex to capture 'def func_name(params):'
+            # Captures: 1=indent, 2=full_def_line, 3=func_name, 4=params_with_parens, 5=colon_and_rest_of_line
+            func_def_pattern = r"^(\s*)(def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(\(.*\))(:.*)?)$"
+            match_a = re.match(func_def_pattern, line_a)
+
+            if match_a:
+                indent_a = match_a.group(1)
+                func_name_a = match_a.group(3)
+                params_a_str = match_a.group(4)
+                signature_suffix_a = match_a.group(5) if match_a.group(5) else ""
+
+                # Look for the next non-empty line, collecting any blank lines in between
+                temp_intermediate_lines = []
+                j = i + 1
+                line_b_content = None
+                while j < len(lines):
+                    if lines[j].strip():
+                        line_b_content = lines[j]
+                        break
+                    temp_intermediate_lines.append(lines[j]) # Store blank line
+                    j += 1
+
+                if line_b_content is not None:
+                    match_b = re.match(func_def_pattern, line_b_content)
+                    if match_b:
+                        indent_b = match_b.group(1)
+                        func_name_b = match_b.group(3)
+                        params_b_str = match_b.group(4)
+                        signature_suffix_b = match_b.group(5) if match_b.group(5) else ""
+
+                        if indent_a == indent_b and func_name_a == func_name_b:
+                            is_b_more_complete = False
+                            has_return_b = "->" in params_b_str or "->" in signature_suffix_b
+                            has_return_a = "->" in params_a_str or "->" in signature_suffix_a
+                            if has_return_b and not has_return_a:
+                                is_b_more_complete = True
+
+                            if not is_b_more_complete:
+                                has_param_typing_b = ": " in params_b_str
+                                has_param_typing_a = ": " in params_a_str
+                                if has_param_typing_b and not has_param_typing_a:
+                                    is_b_more_complete = True
+
+                            if not is_b_more_complete:
+                                if len(params_b_str) > len(params_a_str) + 1 and \
+                                   (has_return_b or (": " in params_b_str)): # Be a bit stricter
+                                    is_b_more_complete = True
+
+                            if not is_b_more_complete and \
+                               (params_a_str == "()" and not has_return_a and not (": " in params_a_str)) and \
+                               (params_b_str != "()" or has_return_b or (": " in params_b_str)):
+                                is_b_more_complete = True
+
+                            if is_b_more_complete:
+                                cleaned_lines.extend(temp_intermediate_lines) # Add collected blank lines
+                                cleaned_lines.append(line_b_content)
+                                i = j + 1
+                                continue
+
+            cleaned_lines.append(line_a)
+            i += 1
+
+        return "\n".join(cleaned_lines)
         
     def show_edit_preview(self, analysis, edit_suggestions):
         """Show edit preview dialog"""
@@ -747,8 +997,16 @@ User request: {prompt}"""
         preview_window.title("AI Edit Suggestions")
         preview_window.geometry("900x700")
         preview_window.configure(bg=ModernStyle.BG_MAIN)
-        preview_window.transient(self.root)
-        preview_window.grab_set()
+
+        # Ensure grab is released when the preview window is destroyed
+        def on_preview_destroy(event, window=preview_window): # Capture window in lambda default
+            if event.widget == window:
+                # print("DEBUG: Preview window destroyed, releasing grab.") # For debugging
+                window.grab_release()
+
+        preview_window.bind("<Destroy>", on_preview_destroy)
+        preview_window.transient(self.root) # Keep on top of main window
+        preview_window.grab_set() # Make modal
         
         # Main frame
         main_frame = tk.Frame(preview_window, bg=ModernStyle.BG_MAIN)
@@ -827,9 +1085,14 @@ User request: {prompt}"""
         scrollbar.pack(side="right", fill="y")
         
         # Create edit cards
-        self.edit_checkboxes = {}
+        self.edit_checkboxes = {} # Stores BooleanVars for checkboxes
+        self.edit_card_widgets = {} # To store references to card frames' buttons and checkbox widgets
+        self.applied_edit_indices = set() # Tracks indices actioned by card buttons
+        # self.active_edit_suggestions = edit_suggestions # Store for reference by card actions if needed
+
         for i, edit in enumerate(edit_suggestions):
-            self.create_edit_card(scrollable_frame, edit, i)
+            # Pass preview_window to card creation for messageboxes if needed by actions
+            self.create_edit_card(scrollable_frame, edit, i, preview_window)
             
         # Action buttons
         action_frame = tk.Frame(main_frame, bg=ModernStyle.BG_MAIN)
@@ -859,7 +1122,7 @@ User request: {prompt}"""
             pady=8
         ).pack(side=tk.RIGHT, padx=5)
         
-    def create_edit_card(self, parent, edit, index):
+    def create_edit_card(self, parent, edit: EditSuggestion, index: int, preview_window_ref):
         """Create a card for displaying an edit suggestion"""
         card_frame = tk.Frame(
             parent, 
@@ -875,9 +1138,9 @@ User request: {prompt}"""
         
         # Checkbox
         checkbox_var = tk.BooleanVar(value=edit.selected)
-        self.edit_checkboxes[index] = checkbox_var
+        self.edit_checkboxes[index] = checkbox_var # Storing the BooleanVar
         
-        checkbox = tk.Checkbutton(
+        checkbox_widget = tk.Checkbutton(
             header_frame,
             variable=checkbox_var,
             bg=ModernStyle.BG_PANEL,
@@ -886,7 +1149,7 @@ User request: {prompt}"""
             activebackground=ModernStyle.BG_PANEL,
             activeforeground=ModernStyle.TEXT_PRIMARY
         )
-        checkbox.pack(side=tk.LEFT)
+        checkbox_widget.pack(side=tk.LEFT)
         
         # Edit info
         info_text = f"Lines {edit.line_start}-{edit.line_end} • {edit.edit_type} • Confidence: {edit.confidence:.0%}"
@@ -908,6 +1171,40 @@ User request: {prompt}"""
             wraplength=800,
             justify='left'
         ).pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        # Card action buttons (Apply this, Skip this)
+        card_action_frame = tk.Frame(card_frame, bg=ModernStyle.BG_PANEL)
+        card_action_frame.pack(fill=tk.X, padx=10, pady=(5, 5))
+
+        apply_this_btn = tk.Button(
+            card_action_frame,
+            text="Apply this Fix",
+            bg=ModernStyle.ACCENT_GREEN,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_SMALL,
+            relief='flat',
+            padx=10,
+            command=lambda idx=index, pw=preview_window_ref: self.apply_single_edit_action(idx, pw)
+        )
+        apply_this_btn.pack(side=tk.LEFT, padx=5)
+
+        skip_this_btn = tk.Button(
+            card_action_frame,
+            text="Skip this Fix",
+            bg=ModernStyle.BG_HOVER,
+            fg=ModernStyle.TEXT_PRIMARY,
+            font=ModernStyle.FONT_SMALL,
+            relief='flat',
+            padx=10,
+            command=lambda idx=index, pw=preview_window_ref: self.skip_single_edit_action(idx, pw)
+        )
+        skip_this_btn.pack(side=tk.LEFT, padx=5)
+
+        self.edit_card_widgets[index] = {
+            'apply_button': apply_this_btn,
+            'skip_button': skip_this_btn,
+            'checkbox_widget': checkbox_widget  # Storing the actual checkbox widget
+        }
         
         # Code diff section
         diff_frame = tk.Frame(card_frame, bg=ModernStyle.BG_MAIN)
@@ -1091,8 +1388,9 @@ User request: {prompt}"""
             
             # Update the editor
             new_content = '\n'.join(current_lines)
+            cleaned_content = self.cleanup_code_post_edit(new_content)
             self.code_text.delete('1.0', 'end')
-            self.code_text.insert('1.0', new_content)
+            self.code_text.insert('1.0', cleaned_content)
             
             # Update UI
             self.update_line_numbers()
