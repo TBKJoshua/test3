@@ -283,11 +283,12 @@ class AICodeEditor:
             editor_frame,
             width=4,
             padx=5,
-            pady=5,
+            pady=1, # Reduced pady
             bg=ModernStyle.BG_PANEL,
             fg=ModernStyle.TEXT_TERTIARY,
             font=ModernStyle.FONT_CODE,
             relief='flat',
+            borderwidth=0, # Explicitly set borderwidth
             state='disabled',
             wrap='none'
         )
@@ -300,6 +301,7 @@ class AICodeEditor:
             fg=ModernStyle.TEXT_PRIMARY,
             font=ModernStyle.FONT_CODE,
             relief='flat',
+            borderwidth=0, # Explicitly set borderwidth
             insertbackground=ModernStyle.TEXT_PRIMARY,
             selectbackground=ModernStyle.ACCENT_BLUE,
             wrap='none',
@@ -309,9 +311,9 @@ class AICodeEditor:
         self.code_text.grid(row=0, column=1, sticky="nsew")
         
         # Scrollbars
-        v_scrollbar = tk.Scrollbar(editor_frame, orient="vertical", command=self.on_scroll)
-        v_scrollbar.grid(row=0, column=2, sticky="ns")
-        self.code_text.config(yscrollcommand=v_scrollbar.set)
+        self.v_scrollbar = tk.Scrollbar(editor_frame, orient="vertical", command=self.code_text.yview)
+        self.v_scrollbar.grid(row=0, column=2, sticky="ns")
+        self.code_text.config(yscrollcommand=self._update_scroll_sync)
         
         h_scrollbar = tk.Scrollbar(editor_frame, orient="horizontal", command=self.code_text.xview)
         h_scrollbar.grid(row=1, column=1, sticky="ew")
@@ -413,10 +415,10 @@ if __name__ == "__main__":
         self.code_text.insert('1.0', sample_code)
         self.update_line_numbers()
         
-    def on_scroll(self, *args):
-        """Handle scrolling for synchronized line numbers"""
-        self.code_text.yview(*args)
-        self.line_numbers.yview(*args)
+    def _update_scroll_sync(self, first, last):
+        """Synchronize scrollbar and line numbers with code_text scroll."""
+        self.v_scrollbar.set(first, last)
+        self.line_numbers.yview_moveto(first)
         
     def on_text_change(self, event=None):
         """Handle text changes in the editor"""
@@ -426,6 +428,10 @@ if __name__ == "__main__":
         
     def update_line_numbers(self):
         """Update the line numbers display"""
+        # Store the current first visible line fraction of code_text
+        # yview() returns (first, last) so we take the first element.
+        current_code_scroll_fraction = self.code_text.yview()[0]
+
         self.line_numbers.config(state='normal')
         self.line_numbers.delete('1.0', 'end')
         
@@ -434,6 +440,12 @@ if __name__ == "__main__":
         
         self.line_numbers.insert('1.0', line_numbers_text)
         self.line_numbers.config(state='disabled')
+
+        # Restore the scroll position of line_numbers to match code_text
+        # This ensures that even if update_line_numbers is called by an event
+        # like a click (which doesn't change content but might refresh numbers),
+        # the scroll position is maintained.
+        self.line_numbers.yview_moveto(current_code_scroll_fraction)
         
     def update_title(self):
         """Update the window title"""
